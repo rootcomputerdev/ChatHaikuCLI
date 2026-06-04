@@ -30,7 +30,6 @@ Both clients use Python’s standard library only. No package installation is re
 - [Expected server API](#expected-server-api)
 - [Color output](#color-output)
 - [Troubleshooting](#troubleshooting)
-- [Recommended repo setup](#recommended-repo-setup)
 - [License](#license)
 
 ---
