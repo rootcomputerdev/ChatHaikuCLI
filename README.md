@@ -822,53 +822,6 @@ python chathaiku_dev.py --no-color
 
 ---
 
-## Recommended repo setup
-
-A clean repository layout:
-
-```text
-ChatHaikuCLI/
-  README.md
-  chathaiku.py
-  chathaiku_dev.py
-  .gitignore
-  LICENSE
-```
-
-Optional folders created during use:
-
-```text
-data/
-  dpo_pairs.jsonl
-  sft_positive.jsonl
-```
-
-Recommended `.gitignore`:
-
-```gitignore
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-
-# Local data collection
-data/*.jsonl
-
-# Local transcripts
-*.txt
-
-# OS/editor files
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-```
-
-If you want to commit example transcripts, remove `*.txt` from `.gitignore` or place examples in a dedicated folder with an exception rule.
-
----
-
 ## Security notes
 
 ChatHaikuCLI sends your conversation text to the configured server endpoint.
@@ -881,12 +834,6 @@ The developer client writes feedback data locally to JSONL files. Review those f
 
 ## License
 
-No license is included by default. Before publishing this repository, add a `LICENSE` file and update this section.
-
-Example:
-
 ```text
 MIT License
 ```
-
-Only use a license label if the matching license file is present in the repo.
