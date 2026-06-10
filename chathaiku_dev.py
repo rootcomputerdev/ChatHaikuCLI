@@ -464,6 +464,199 @@ def read_multiline_input(label: str) -> Optional[str]:
 #  Slash commands
 # ──────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────
+#  Plugin system
+# ──────────────────────────────────────────────────────────
+#
+# Plugins are Python files in the `plugins/` directory next to this script.
+# Each plugin defines one subclass of `Plugin` with a `name`, optional `commands`
+# (list of slash-command strings it handles), and a `handle(cmd, args, ctx)`
+# method. Plugins are loaded on startup and can be reloaded with /plugin reload.
+#
+# Plugin code receives a `PluginContext` object exposing:
+#   ctx.server_url     -- current chat endpoint
+#   ctx.sampling       -- current SamplingParams (read or modify)
+#   ctx.conversation   -- the Conversation (read or clear)
+#   ctx.preferences    -- the PreferenceCollector (record_good / record_preference)
+#   ctx.chat(prompt, history=None) -> str|None
+#                      -- send a one-off chat request, returning the reply
+#                         (or None on error). Does NOT modify ctx.conversation.
+#   ctx.print(msg, color=...)
+#                      -- print a colored message in the chat UI
+
+import importlib.util
+
+
+class PluginContext:
+    """Read/write handle into the chat session that plugins receive."""
+
+    def __init__(self, state: dict):
+        self._state = state
+
+    @property
+    def server_url(self) -> str:
+        return self._state["server_url"]
+
+    @property
+    def sampling(self) -> "SamplingParams":
+        return self._state["sampling"]
+
+    @property
+    def conversation(self) -> "Conversation":
+        return self._state["conversation"]
+
+    @property
+    def preferences(self) -> "PreferenceCollector":
+        return self._state["preferences"]
+
+    def chat(self, prompt: str, history: Optional[List[dict]] = None,
+             sampling_override: Optional[dict] = None) -> Optional[str]:
+        """Send a one-off chat request. Returns reply text or None on error.
+        Does NOT touch self.conversation — plugins manage their own history.
+        """
+        msg_history = list(history) if history is not None else []
+        msg_history.append({"role": "user", "content": prompt})
+        params = self.sampling.to_payload()
+        if sampling_override:
+            params.update(sampling_override)
+        reply, error = post_chat(self.server_url, msg_history, params)
+        if error:
+            return None
+        return reply
+
+    def print(self, msg: str, color: str = ""):
+        print(color + msg + Color.RESET)
+
+
+class Plugin:
+    """Subclass this in plugin files. Set `name` and `commands`, implement `handle`."""
+
+    name: str = "unnamed"
+    description: str = ""
+    commands: List[str] = []  # e.g. ["/autodpo", "/auto-dpo"]
+
+    def on_load(self, ctx: PluginContext) -> None:
+        """Called once when the plugin is loaded. Optional."""
+        pass
+
+    def on_unload(self, ctx: PluginContext) -> None:
+        """Called before the plugin is reloaded or removed. Optional."""
+        pass
+
+    def handle(self, cmd: str, args: List[str], ctx: PluginContext) -> None:
+        """Called when one of self.commands is invoked. Required."""
+        raise NotImplementedError
+
+    def help_text(self) -> str:
+        """Override to provide /plugin help <name> output."""
+        return self.description or "(no help available)"
+
+
+class PluginManager:
+    """Discovers, loads, and dispatches to plugins in `plugins/`."""
+
+    def __init__(self, plugins_dir: str, state: dict):
+        self.plugins_dir = plugins_dir
+        self.state = state
+        self.plugins: List[Plugin] = []
+        # Map command string -> Plugin that handles it
+        self.command_map: dict = {}
+
+    def _make_context(self) -> PluginContext:
+        return PluginContext(self.state)
+
+    def load_all(self) -> tuple:
+        """Discover and load every .py file in plugins_dir. Returns (loaded, errors)."""
+        # Call on_unload for any currently loaded plugins
+        ctx = self._make_context()
+        for p in self.plugins:
+            try:
+                p.on_unload(ctx)
+            except Exception as e:
+                print(Color.YELLOW + f"  [plugin] on_unload of {p.name} raised: {e}" + Color.RESET)
+
+        self.plugins = []
+        self.command_map = {}
+
+        if not os.path.isdir(self.plugins_dir):
+            return ([], [])
+
+        loaded = []
+        errors = []
+        for filename in sorted(os.listdir(self.plugins_dir)):
+            if not filename.endswith(".py") or filename.startswith("_"):
+                continue
+            path = os.path.join(self.plugins_dir, filename)
+            mod_name = f"haiku_plugin_{filename[:-3]}"
+            try:
+                spec = importlib.util.spec_from_file_location(mod_name, path)
+                module = importlib.util.module_from_spec(spec)
+                # Expose the Plugin base class and Color so plugins can import them
+                module.Plugin = Plugin
+                module.PluginContext = PluginContext
+                module.Color = Color
+                spec.loader.exec_module(module)
+            except Exception as e:
+                errors.append((filename, f"import failed: {e}"))
+                continue
+
+            # Find Plugin subclasses defined in the module
+            found_any = False
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                if (isinstance(attr, type) and
+                        issubclass(attr, Plugin) and
+                        attr is not Plugin):
+                    try:
+                        instance = attr()
+                    except Exception as e:
+                        errors.append((filename, f"instantiation of {attr_name} failed: {e}"))
+                        continue
+                    self.plugins.append(instance)
+                    for cmd in (instance.commands or []):
+                        if cmd in self.command_map:
+                            errors.append((
+                                filename,
+                                f"command {cmd!r} already registered by "
+                                f"{self.command_map[cmd].name!r}",
+                            ))
+                        else:
+                            self.command_map[cmd] = instance
+                    try:
+                        instance.on_load(ctx)
+                    except Exception as e:
+                        errors.append((filename, f"on_load of {instance.name} raised: {e}"))
+                    loaded.append(instance)
+                    found_any = True
+
+            if not found_any:
+                errors.append((filename, "no Plugin subclass found"))
+
+        return loaded, errors
+
+    def find(self, name: str) -> Optional[Plugin]:
+        for p in self.plugins:
+            if p.name == name:
+                return p
+        return None
+
+    def try_dispatch(self, cmd: str, args: List[str]) -> bool:
+        """Try to route cmd to a plugin. Returns True if handled."""
+        plugin = self.command_map.get(cmd)
+        if plugin is None:
+            return False
+        ctx = self._make_context()
+        try:
+            plugin.handle(cmd, args, ctx)
+        except KeyboardInterrupt:
+            print(Color.YELLOW + f"\n  [plugin {plugin.name}] interrupted" + Color.RESET)
+        except Exception as e:
+            print(Color.RED + f"  [plugin {plugin.name}] raised: {e}" + Color.RESET)
+            import traceback
+            traceback.print_exc()
+        return True
+
+
 HELP_TEXT = """
 Chat commands:
   /clear              Reset conversation history
@@ -491,6 +684,11 @@ Feedback collection (writes JSONL files for offline DPO):
   /bad                Mark last reply bad, prompt for rewrite, save DPO pair
   /rewrite            Rewrite last reply, save DPO pair
   /stats              Show counts collected this session and on disk
+
+Plugins:
+  /plugin             List loaded plugins
+  /plugin reload      Reload plugins from the plugins/ directory
+  /plugin help <name> Show help for a specific plugin
 
 Misc:
   /help               This help
@@ -700,7 +898,48 @@ def handle_slash(cmd: str, args: List[str], state: dict) -> bool:
               f"    Session:    {pc.session_good}"
               + Color.RESET)
 
+    elif cmd == "/plugin":
+        # /plugin                -> list loaded plugins
+        # /plugin list           -> same
+        # /plugin reload         -> reload from disk
+        # /plugin help <name>    -> show help for one plugin
+        pm = state.get("plugin_manager")
+        if pm is None:
+            print(Color.YELLOW + "  Plugin manager not initialized." + Color.RESET)
+        elif not args or args[0] == "list":
+            if not pm.plugins:
+                print(Color.DIM + "  No plugins loaded." + Color.RESET)
+                print(Color.DIM + f"  Drop .py files into {pm.plugins_dir}/ and /plugin reload." + Color.RESET)
+            else:
+                print(Color.DIM + f"  Loaded plugins ({len(pm.plugins)}):" + Color.RESET)
+                for p in pm.plugins:
+                    cmds = ", ".join(p.commands) if p.commands else "(no commands)"
+                    print(Color.DIM + f"    {p.name:<20} {cmds}" + Color.RESET)
+                    if p.description:
+                        print(Color.DIM + f"      {p.description}" + Color.RESET)
+        elif args[0] == "reload":
+            print(Color.DIM + f"  Reloading plugins from {pm.plugins_dir}/..." + Color.RESET)
+            loaded, errors = pm.load_all()
+            print(Color.GREEN + f"  Loaded {len(loaded)} plugin(s)." + Color.RESET)
+            for filename, err in errors:
+                print(Color.YELLOW + f"  ⚠ {filename}: {err}" + Color.RESET)
+        elif args[0] == "help" and len(args) >= 2:
+            target = pm.find(args[1])
+            if target is None:
+                print(Color.YELLOW + f"  No plugin named {args[1]!r}." + Color.RESET)
+            else:
+                print(Color.DIM + f"  {target.name}" + Color.RESET)
+                if target.commands:
+                    print(Color.DIM + f"  Commands: {', '.join(target.commands)}" + Color.RESET)
+                print(Color.DIM + "  " + target.help_text().replace("\n", "\n  ") + Color.RESET)
+        else:
+            print(Color.YELLOW + "  Usage: /plugin [list|reload|help <name>]" + Color.RESET)
+
     else:
+        # Not a built-in command — try plugins before giving up
+        pm = state.get("plugin_manager")
+        if pm is not None and pm.try_dispatch(cmd, args):
+            return True
         print(Color.YELLOW + f"  Unknown command: {cmd}. Try /help." + Color.RESET)
 
     return True
@@ -722,6 +961,8 @@ def main():
                    help="JSONL file for /bad and /rewrite DPO triples")
     p.add_argument("--sft-positive-out", type=str, default="data/sft_positive.jsonl",
                    help="JSONL file for /good positive examples")
+    p.add_argument("--plugins-dir", type=str, default="plugins",
+                   help="Directory to load plugins from (default: plugins)")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI colors")
     args = p.parse_args()
@@ -761,6 +1002,22 @@ def main():
         "preferences": preferences,
         "pending_retry": None,
     }
+
+    # Load plugins from ./plugins/ (or wherever --plugins-dir points)
+    plugin_manager = PluginManager(plugins_dir=args.plugins_dir, state=state)
+    state["plugin_manager"] = plugin_manager
+    loaded, errors = plugin_manager.load_all()
+    if loaded:
+        print(Color.DIM + f"  Loaded {len(loaded)} plugin(s) from {args.plugins_dir}/:" + Color.RESET)
+        for p in loaded:
+            cmds = ", ".join(p.commands) if p.commands else "(no cmds)"
+            print(Color.DIM + f"    {p.name}: {cmds}" + Color.RESET)
+    elif os.path.isdir(args.plugins_dir):
+        print(Color.DIM + f"  No plugins found in {args.plugins_dir}/" + Color.RESET)
+    for filename, err in errors:
+        print(Color.YELLOW + f"  ⚠ plugin {filename}: {err}" + Color.RESET)
+    if loaded or errors:
+        print()
 
     while True:
         # Get input
