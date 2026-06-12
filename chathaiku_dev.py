@@ -11,6 +11,7 @@ Like chathaiku.py but with the controls you'd want as a developer:
 Usage:
   python chathaiku_dev.py
   python chathaiku_dev.py --server https://chathaiku.com/api/haiku.php
+  python chathaiku_dev.py --server https://chathaiku.com/api/tanka.php
   python chathaiku_dev.py --dpo-out my_pairs.jsonl
 
 Type /help inside the chat for the full command list.
@@ -32,14 +33,14 @@ from typing import List, Optional
 # ──────────────────────────────────────────────────────────
 
 BANNER = r"""
-   ____ _           _   _   _       _ _         _
-  / ___| |__   __ _| |_| | | | __ _(_) | ___   _| |
- | |   | '_ \ / _` | __| |_| |/ _` | | |/ / | | | |
- | |___| | | | (_| | |_|  _  | (_| | |   <| |_| |_|
-  \____|_| |_|\__,_|\__|_| |_|\__,_|_|_|\_\__,_(_)
-                                                  dev
+ ██████╗ ██╗  ██╗  █████╗  ████████╗██╗  ██╗  █████╗  ██████╗  ██╗  ██╗ ██╗  ██╗
+██╔════╝ ██║  ██║ ██╔══██╗ ╚══██╔══╝██║  ██║ ██╔══██╗ ╚═██╔═╝  ██║ ██╔╝ ██║  ██║
+██║      ███████║ ███████║    ██║   ███████║ ███████║   ██║    █████╔╝  ██║  ██║
+██║      ██╔══██║ ██╔══██║    ██║   ██╔══██║ ██╔══██║   ██║    ██╔═██╗  ██║  ██║
+╚██████╗ ██║  ██║ ██║  ██║    ██║   ██║  ██║ ██║  ██║ ██████╗  ██║  ██╗ ╚██████╔╝
+ ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝    ╚═╝   ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═════╝  ╚═╝  ╚═╝  ╚═════╝ 
+                                                               d e v ( v 1 . 1 )
 """
-
 
 class Color:
     RESET = "\033[0m"
@@ -90,7 +91,6 @@ def print_banner(server_url: str, health: Optional[dict]):
 # ──────────────────────────────────────────────────────────
 
 DEFAULT_ENDPOINT = "https://chathaiku.com/api/haiku.php"
-BACKEND_FALLBACK_ENDPOINT = "http://haiku.rootcomputer.dev/api/chat"
 
 
 def make_request_headers(url: str, *, has_json_body: bool = False) -> dict:
@@ -169,40 +169,56 @@ def normalize_server_url(raw_url: str) -> str:
 
 
 def resolve_endpoint(server_url: str) -> dict:
-    """Return normalized display, chat, and optional health URLs."""
+    """Return normalized display, chat, and health URLs.
+
+    Supported input shapes:
+      - https://chathaiku.com/api/haiku.php
+      - https://chathaiku.com/api/tanka.php
+      - https://chathaiku.com/api/haiku.php/api/chat
+      - https://chathaiku.com/api/haiku.php/api/health
+      - http://localhost:PORT or any plain server base
+    """
     display_url = normalize_server_url(server_url)
     parsed = urllib.parse.urlsplit(display_url)
     path = parsed.path.rstrip("/")
 
-    # Direct chat route on the Python server.
+    def with_path(new_path: str) -> str:
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, new_path.rstrip("/"), "", ""))
+
+    # Direct chat route, including PHP-router chat routes like:
+    # /api/haiku.php/api/chat or /api/tanka.php/api/chat
     if path.endswith("/api/chat"):
         base_path = path[:-len("/api/chat")].rstrip("/")
-        base_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path, "", "")).rstrip("/")
+        base_url = with_path(base_path).rstrip("/")
         return {
-            "display_url": display_url,
+            "display_url": base_url,
             "chat_url": display_url,
             "health_url": base_url + "/api/health",
             "kind": "direct-chat",
         }
 
-    # Direct PHP proxy endpoint used by the public website: /api/haiku.php, /api/tanka.php, etc.
-    if path.endswith(".php"):
-        return {
-            "display_url": display_url,
-            "chat_url": display_url,
-            "health_url": None,
-            "kind": "php-proxy",
-        }
-
-    # If a health route is pasted, recover the server base.
+    # Health route pasted directly. Convert it back to its dynamic base.
+    # For example, /api/tanka.php/api/health -> /api/tanka.php.
     if path.endswith("/api/health"):
         base_path = path[:-len("/api/health")].rstrip("/")
-        base_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path, "", "")).rstrip("/")
+        base_url = with_path(base_path).rstrip("/")
         return {
             "display_url": base_url,
             "chat_url": base_url + "/api/chat",
             "health_url": display_url,
             "kind": "server-base",
+        }
+
+    # PHP router/proxy base used by the public website:
+    # /api/haiku.php, /api/tanka.php, etc.
+    # Do not hardcode the model name; derive health/chat from the chosen PHP file.
+    if path.endswith(".php"):
+        base_url = display_url.rstrip("/")
+        return {
+            "display_url": base_url,
+            "chat_url": base_url + "/api/chat",
+            "health_url": base_url + "/api/health",
+            "kind": "php-router",
         }
 
     # Plain base server URL.
@@ -228,19 +244,6 @@ def ping_server(server_url: str, timeout: float = 5.0) -> Optional[dict]:
                 data.setdefault("endpoint_type", ep["kind"])
                 return data
             return None
-
-        # Public PHP proxy endpoints do not expose /api/health. The website does
-        # not health-check them; it simply POSTs to /api/haiku.php. Some hosts/WAFs
-        # also reject Python OPTIONS probes even when browser POSTs work, so do not
-        # mark the model offline here. Actual failures will be reported by post_chat().
-        return {
-            "model": "Haiku public PHP proxy",
-            "params": None,
-            "device": "public",
-            "endpoint": ep["display_url"],
-            "endpoint_type": ep["kind"],
-            "health": "not_available",
-        }
 
     except (ValueError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
             json.JSONDecodeError, ConnectionRefusedError, OSError):
@@ -283,31 +286,6 @@ def post_chat(server_url: str, history: List[dict], params: dict,
             body = e.read().decode("utf-8")[:500]
         except Exception:
             pass
-
-        if e.code == 412 and ep.get("kind") == "php-proxy":
-            fallback_url = BACKEND_FALLBACK_ENDPOINT
-            fallback_body = {"history": history[-10:], **params}
-            fallback_payload = json.dumps(fallback_body).encode("utf-8")
-            fallback_req = urllib.request.Request(
-                fallback_url,
-                data=fallback_payload,
-                headers=make_request_headers(fallback_url, has_json_body=True),
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(fallback_req, timeout=timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                if isinstance(data, dict) and data.get("error") and not data.get("reply"):
-                    return None, f"Public PHP proxy was blocked by ModSecurity; backend fallback returned: {data.get('error')}"
-                reply = data.get("reply", "") if isinstance(data, dict) else ""
-                if isinstance(reply, str) and reply.strip():
-                    return reply, None
-                return None, "Public PHP proxy was blocked by ModSecurity; backend fallback returned an empty reply."
-            except Exception as fallback_error:
-                return None, (
-                    f"HTTP 412 from public PHP proxy: {body or e.reason}. "
-                    f"Backend fallback also failed: {fallback_error}"
-                )
 
         return None, f"HTTP {e.code}: {body or e.reason}"
     except urllib.error.URLError as e:
