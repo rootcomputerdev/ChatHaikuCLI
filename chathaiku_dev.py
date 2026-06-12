@@ -147,8 +147,7 @@ def normalize_server_url(raw_url: str) -> str:
     raw_url = (raw_url or "").strip().rstrip("/")
     if not raw_url:
         raise ValueError("empty endpoint")
-
-    # Allow CLI users to type the same relative endpoint shown in main_chat.js.
+      
     if raw_url.startswith("/api/"):
         raw_url = "https://chathaiku.com" + raw_url
 
@@ -185,8 +184,6 @@ def resolve_endpoint(server_url: str) -> dict:
     def with_path(new_path: str) -> str:
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, new_path.rstrip("/"), "", ""))
 
-    # Direct chat route, including PHP-router chat routes like:
-    # /api/haiku.php/api/chat or /api/tanka.php/api/chat
     if path.endswith("/api/chat"):
         base_path = path[:-len("/api/chat")].rstrip("/")
         base_url = with_path(base_path).rstrip("/")
@@ -197,8 +194,6 @@ def resolve_endpoint(server_url: str) -> dict:
             "kind": "direct-chat",
         }
 
-    # Health route pasted directly. Convert it back to its dynamic base.
-    # For example, /api/tanka.php/api/health -> /api/tanka.php.
     if path.endswith("/api/health"):
         base_path = path[:-len("/api/health")].rstrip("/")
         base_url = with_path(base_path).rstrip("/")
@@ -209,9 +204,6 @@ def resolve_endpoint(server_url: str) -> dict:
             "kind": "server-base",
         }
 
-    # PHP router/proxy base used by the public website:
-    # /api/haiku.php, /api/tanka.php, etc.
-    # Do not hardcode the model name; derive health/chat from the chosen PHP file.
     if path.endswith(".php"):
         base_url = display_url.rstrip("/")
         return {
