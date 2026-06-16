@@ -21,6 +21,7 @@ import sys
 import json
 import time
 import argparse
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -32,11 +33,13 @@ from typing import List, Optional
 # ──────────────────────────────────────────────────────────
 
 BANNER = r"""
-   ____ _           _   _   _       _ _         _
-  / ___| |__   __ _| |_| | | | __ _(_) | ___   _| |
- | |   | '_ \ / _` | __| |_| |/ _` | | |/ / | | | |
- | |___| | | | (_| | |_|  _  | (_| | |   <| |_| |_|
-  \____|_| |_|\__,_|\__|_| |_|\__,_|_|_|\_\__,_(_)
+ ██████╗ ██╗  ██╗  █████╗  ████████╗██╗  ██╗  █████╗  ██████╗  ██╗  ██╗ ██╗  ██╗
+██╔════╝ ██║  ██║ ██╔══██╗ ╚══██╔══╝██║  ██║ ██╔══██╗ ╚═██╔═╝  ██║ ██╔╝ ██║  ██║
+██║      ███████║ ███████║    ██║   ███████║ ███████║   ██║    █████╔╝  ██║  ██║
+██║      ██╔══██║ ██╔══██║    ██║   ██╔══██║ ██╔══██║   ██║    ██╔═██╗  ██║  ██║
+╚██████╗ ██║  ██║ ██║  ██║    ██║   ██║  ██║ ██║  ██║ ██████╗  ██║  ██╗ ╚██████╔╝
+ ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝    ╚═╝   ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═════╝  ╚═╝  ╚═╝  ╚═════╝ 
+                                                                     ( v 1 . 2 )
 """
 
 # Optional color (ANSI). Disable with --no-color or NO_COLOR env var.
@@ -71,6 +74,9 @@ def print_banner(server_url: str):
 
 DEFAULT_ENDPOINT = "https://chathaiku.com/api/haiku.php"
 BACKEND_FALLBACK_ENDPOINT = "http://haiku.rootcomputer.dev/api/chat"
+APP_NAME = "chathaiku"
+APP_VERSION = "1.2.0"
+UPDATE_MANIFEST_URL = "https://rootcomputer.dev/software/chathaikucli/update/chathaiku_cli_updates.json"
 
 
 def make_request_headers(url: str, *, has_json_body: bool = False) -> dict:
@@ -149,35 +155,35 @@ def normalize_server_url(raw_url: str) -> str:
 
 
 def resolve_endpoint(server_url: str) -> dict:
-    """Resolve either a base server URL or a direct POST endpoint."""
+    """Return normalized display, chat, and health URLs.
+
+    Supported input shapes:
+      - https://chathaiku.com/api/haiku.php
+      - https://chathaiku.com/api/tanka.php
+      - https://chathaiku.com/api/haiku.php/api/chat
+      - https://chathaiku.com/api/haiku.php/api/health
+      - http://localhost:PORT or any plain server base
+    """
     display_url = normalize_server_url(server_url)
     parsed = urllib.parse.urlsplit(display_url)
     path = parsed.path.rstrip("/")
 
-    # Direct Python server chat endpoint.
+    def with_path(new_path: str) -> str:
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, new_path.rstrip("/"), "", ""))
+
     if path.endswith("/api/chat"):
         base_path = path[:-len("/api/chat")].rstrip("/")
-        base_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path, "", "")).rstrip("/")
+        base_url = with_path(base_path).rstrip("/")
         return {
-            "display_url": display_url,
+            "display_url": base_url,
             "chat_url": display_url,
             "health_url": base_url + "/api/health",
             "kind": "direct-chat",
         }
 
-    # Public website PHP proxy endpoint, e.g. /api/haiku.php.
-    if path.endswith(".php"):
-        return {
-            "display_url": display_url,
-            "chat_url": display_url,
-            "health_url": None,
-            "kind": "php-proxy",
-        }
-
-    # If a health URL is pasted, recover the base URL.
     if path.endswith("/api/health"):
         base_path = path[:-len("/api/health")].rstrip("/")
-        base_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path, "", "")).rstrip("/")
+        base_url = with_path(base_path).rstrip("/")
         return {
             "display_url": base_url,
             "chat_url": base_url + "/api/chat",
@@ -185,7 +191,17 @@ def resolve_endpoint(server_url: str) -> dict:
             "kind": "server-base",
         }
 
-    # Plain base server URL.
+    # PHP router/proxy base used by the public website.
+    # Do not hardcode the model name; derive health/chat from the chosen PHP file.
+    if path.endswith(".php"):
+        base_url = display_url.rstrip("/")
+        return {
+            "display_url": base_url,
+            "chat_url": base_url + "/api/chat",
+            "health_url": base_url + "/api/health",
+            "kind": "php-router",
+        }
+
     base_url = display_url.rstrip("/")
     return {
         "display_url": base_url,
@@ -196,7 +212,7 @@ def resolve_endpoint(server_url: str) -> dict:
 
 
 def ping_server(server_url: str, timeout: float = 5.0) -> Optional[dict]:
-    """Check health when available. Direct PHP proxy endpoints have no health route."""
+    """Check endpoint health/reachability."""
     try:
         ep = resolve_endpoint(server_url)
 
@@ -208,20 +224,193 @@ def ping_server(server_url: str, timeout: float = 5.0) -> Optional[dict]:
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            return data if isinstance(data, dict) else None
-
-        # The public website does not health-check /api/haiku.php; it POSTs to it.
-        # Treat it as configured and let the first chat request report real errors.
-        return {
-            "model": "Haiku public PHP proxy",
-            "params": None,
-            "device": "public",
-            "health": "not_available",
-        }
+            if isinstance(data, dict):
+                data.setdefault("endpoint", ep["display_url"])
+                data.setdefault("endpoint_type", ep["kind"])
+                return data
+            return None
 
     except (ValueError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
             json.JSONDecodeError, ConnectionRefusedError, OSError):
         return None
+
+
+def _version_key(value: str) -> tuple:
+    """Convert loose semver-ish strings into comparable tuples."""
+    text = str(value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    text = text.replace("-", ".").replace("_", ".")
+    parts = []
+    for chunk in text.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            parts.append(int(digits))
+        elif chunk:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+def _select_update_record(manifest: dict, app_name: str) -> Optional[dict]:
+    """Support both {apps:{name:{...}}} and flat manifest shapes."""
+    if not isinstance(manifest, dict):
+        return None
+
+    record = None
+    apps = manifest.get("apps")
+    if isinstance(apps, dict):
+        record = apps.get(app_name)
+        if record is None and app_name == "chathaiku_dev":
+            record = apps.get("chathaiku-dev")
+        if record is None and app_name == "chathaiku":
+            record = apps.get("chathaiku_cli")
+
+    if record is None:
+        record = manifest.get(app_name)
+
+    if record is None and any(k in manifest for k in ("latest", "version", "latest_version")):
+        record = manifest
+
+    if isinstance(record, str):
+        record = {"latest": record}
+    return record if isinstance(record, dict) else None
+
+
+def check_for_update(app_name: str, current_version: str, manifest_url: str,
+                     timeout: float = 4.0) -> Optional[dict]:
+    """Fetch the update manifest and return a normalized status dictionary."""
+    if not manifest_url:
+        return None
+
+    req = urllib.request.Request(
+        manifest_url,
+        headers=make_request_headers(manifest_url),
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        manifest = json.loads(resp.read().decode("utf-8"))
+
+    record = _select_update_record(manifest, app_name)
+    if not record:
+        return None
+
+    latest = (
+        record.get("latest")
+        or record.get("version")
+        or record.get("latest_version")
+    )
+    if latest is None:
+        return None
+    latest = str(latest).strip()
+
+    return {
+        "app": app_name,
+        "current": current_version,
+        "latest": latest,
+        "up_to_date": _version_key(latest) <= _version_key(current_version),
+        "download_url": record.get("download_url") or record.get("url"),
+        "notes_url": record.get("notes_url") or record.get("changelog_url"),
+        "message": record.get("message") or record.get("notes"),
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def start_update_check_loop(state: dict, app_name: str, current_version: str,
+                            manifest_url: str, interval: float) -> None:
+    """Start a quiet background update loop.
+
+    The worker never prints while input() is active. It only caches status;
+    the main loop prints notices at safe prompt boundaries.
+    """
+    if not manifest_url or interval <= 0:
+        return
+
+    lock = state.setdefault("update_lock", threading.Lock())
+    stop_event = threading.Event()
+    state["update_stop_event"] = stop_event
+    state["update_url"] = manifest_url
+    state["update_interval"] = interval
+
+    def worker():
+        while not stop_event.is_set():
+            try:
+                result = check_for_update(app_name, current_version, manifest_url)
+                with lock:
+                    state["update_last_result"] = result
+                    state["update_last_error"] = None
+                    if result and not result.get("up_to_date"):
+                        state["update_notice"] = result
+            except Exception as e:
+                with lock:
+                    state["update_last_error"] = str(e)
+            stop_event.wait(max(1.0, float(interval)))
+
+    thread = threading.Thread(target=worker, name="chathaiku-update-check", daemon=True)
+    state["update_thread"] = thread
+    thread.start()
+
+
+def print_update_notice_if_needed(state: dict, force: bool = False) -> None:
+    lock = state.get("update_lock")
+    if lock is None:
+        return
+
+    with lock:
+        notice = state.get("update_notice")
+        if not notice:
+            return
+        notice_key = f"{notice.get('app')}:{notice.get('latest')}"
+        if not force and state.get("update_notice_shown") == notice_key:
+            return
+        state["update_notice_shown"] = notice_key
+
+    print(Color.YELLOW +
+          f"  Update available: {notice.get('app')} "
+          f"{notice.get('current')} → {notice.get('latest')}" + Color.RESET)
+    if notice.get("message"):
+        print(Color.DIM + f"  {notice['message']}" + Color.RESET)
+    if notice.get("download_url"):
+        print(Color.DIM + f"  Download: {notice['download_url']}" + Color.RESET)
+    if notice.get("notes_url"):
+        print(Color.DIM + f"  Notes:    {notice['notes_url']}" + Color.RESET)
+    print(Color.DIM + "  Run /update to check again." + Color.RESET)
+    print()
+
+
+def run_manual_update_check(state: dict, app_name: str, current_version: str) -> None:
+    manifest_url = state.get("update_url") or UPDATE_MANIFEST_URL
+    print(Color.DIM + f"  Checking for updates at {manifest_url}..." + Color.RESET, end="", flush=True)
+    try:
+        result = check_for_update(app_name, current_version, manifest_url)
+    except Exception as e:
+        print(Color.RED + " failed" + Color.RESET)
+        print(Color.YELLOW + f"  Update check error: {e}" + Color.RESET)
+        return
+
+    lock = state.setdefault("update_lock", threading.Lock())
+    with lock:
+        state["update_last_result"] = result
+        state["update_last_error"] = None
+        if result and not result.get("up_to_date"):
+            state["update_notice"] = result
+            state["update_notice_shown"] = None
+
+    if result and not result.get("up_to_date"):
+        print(Color.YELLOW + " update available" + Color.RESET)
+        print_update_notice_if_needed(state, force=True)
+    elif result:
+        print(Color.GREEN + " up to date" + Color.RESET)
+        print(Color.DIM + f"  Current: {current_version}  Latest: {result.get('latest')}" + Color.RESET)
+    else:
+        print(Color.YELLOW + " no app entry found" + Color.RESET)
+        print(Color.DIM + "  Manifest loaded, but no matching version entry was found." + Color.RESET)
 
 
 def post_chat(server_url: str, history: List[dict], timeout: float = 120.0) -> tuple:
@@ -263,7 +452,7 @@ def post_chat(server_url: str, history: List[dict], timeout: float = 120.0) -> t
 
         # Shared-host ModSecurity can block Python-origin POSTs to the public PHP
         # proxy. For CLI/dev use, fall back to the same backend haiku.php proxies to.
-        if e.code == 412 and ep.get("kind") == "php-proxy":
+        if e.code == 412 and ep.get("kind") in {"php-proxy", "php-router"}:
             fallback_payload = json.dumps({
                 "history": history,
                 "temperature": 0.85,
@@ -329,7 +518,7 @@ class Conversation:
 #  Slash commands
 # ──────────────────────────────────────────────────────────
 
-def handle_slash(cmd: str, args: List[str], conv: Conversation) -> bool:
+def handle_slash(cmd: str, args: List[str], conv: Conversation, state: dict) -> bool:
     """Return False to quit, True to continue."""
     if cmd in ("/quit", "/exit", "/q", "/bye"):
         print(Color.DIM + "  Goodbye." + Color.RESET)
@@ -356,11 +545,15 @@ def handle_slash(cmd: str, args: List[str], conv: Conversation) -> bool:
   Commands:
     /clear         Start a fresh conversation
     /save FILE     Save the conversation to a text file
+    /update        Check for CLI updates now
     /help          Show this help
     /quit          Exit (or just press Ctrl-C)
 
   Just type a message and press Enter to talk to Haiku.
 """ + Color.RESET)
+
+    elif cmd == "/update":
+        run_manual_update_check(state, APP_NAME, APP_VERSION)
 
     else:
         print(Color.YELLOW + f"  Unknown command: {cmd}. Type /help for the list." + Color.RESET)
@@ -380,6 +573,12 @@ def main():
     )
     p.add_argument("--server", type=str, default=DEFAULT_ENDPOINT,
                    help=f"Server base URL or direct chat endpoint (default: {DEFAULT_ENDPOINT})")
+    p.add_argument("--no-update-check", action="store_true",
+                   help="Disable background CLI update checks")
+    p.add_argument("--update-url", type=str, default=UPDATE_MANIFEST_URL,
+                   help=f"Update manifest URL (default: {UPDATE_MANIFEST_URL})")
+    p.add_argument("--update-interval", type=float, default=21600.0,
+                   help="Seconds between background update checks (default: 21600 / 6 hours)")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI colors (useful for log files or limited terminals)")
     args = p.parse_args()
@@ -388,7 +587,7 @@ def main():
         Color.disable()
 
     try:
-        server_url = normalize_server_url(args.server)
+        server_url = resolve_endpoint(args.server)["display_url"]
     except ValueError as e:
         print(Color.RED + f"  Invalid server URL: {e}" + Color.RESET)
         sys.exit(1)
@@ -408,8 +607,12 @@ def main():
     print()
 
     conv = Conversation()
+    state = {"update_url": args.update_url}
+    if not args.no_update_check:
+        start_update_check_loop(state, APP_NAME, APP_VERSION, args.update_url, args.update_interval)
 
     while True:
+        print_update_notice_if_needed(state)
         # ─ Get input ─
         try:
             user_input = input(Color.BOLD + "you: " + Color.RESET).strip()
@@ -424,7 +627,7 @@ def main():
         # ─ Slash commands ─
         if user_input.startswith("/"):
             parts = user_input.split()
-            should_continue = handle_slash(parts[0], parts[1:], conv)
+            should_continue = handle_slash(parts[0], parts[1:], conv, state)
             if not should_continue:
                 break
             continue
