@@ -1,80 +1,105 @@
 ![ChatHaikuCLI preview](assets/banner.png)
 
-A lightweight command-line interface for chatting with RootComputer models from a terminal.
+# ChatHaikuCLI
 
-ChatHaikuCLI includes two Python clients:
+A dependency-free command-line interface for chatting with Rootcomputer models from a terminal.
 
-- `chathaiku.py` — the simple public chat client for everyday terminal use.
-- `chathaiku_dev.py` — the developer client with endpoint switching, sampling controls, health checks, retry/undo tools, latency output, and local preference-data collection.
+ChatHaikuCLI ships with two Python clients:
 
-Both clients use Python’s standard library only. No package installation is required beyond Python itself.
+| File | Purpose |
+|---|---|
+| `chathaiku.py` | Public CLI client for everyday terminal chat. |
+| `chathaiku_dev.py` | Developer CLI client with endpoint switching, sampling controls, health checks, plugin support, evaluator tooling, AutoDPO support, latency output, and local preference-data collection. |
+
+Both clients use only the Python standard library. No `pip install` step is required.
+
+---
+
+## Highlights
+
+- Works with Rootcomputer-compatible `/api/chat` endpoints.
+- Supports public PHP router endpoints such as `https://chathaiku.com/api/haiku.php`.
+- Infers `/api/chat` and `/api/health` routes from base URLs, direct chat URLs, health URLs, and PHP router URLs.
+- Includes notify-only update checks using the Rootcomputer update manifest.
+- Includes a developer plugin system for tools like `/autodpo` and `/evaluator`.
+- Caches health metadata in the developer client so plugins can record the active model name correctly.
+- Collects local SFT-positive and DPO preference examples as JSONL.
+- Runs on Windows, macOS, and Linux with Python 3.8+.
 
 ---
 
 ## Table of contents
 
-- [Overview](#overview)
-- [Repository files](#repository-files)
 - [Requirements](#requirements)
+- [Repository layout](#repository-layout)
 - [Quick start](#quick-start)
-- [Installing Python](#installing-python)
 - [Running the public client](#running-the-public-client)
 - [Running the developer client](#running-the-developer-client)
-- [Choosing a server or endpoint](#choosing-a-server-or-endpoint)
-- [Supported endpoint formats](#supported-endpoint-formats)
+- [Update checks](#update-checks)
+- [Endpoint formats](#endpoint-formats)
 - [Public client commands](#public-client-commands)
 - [Developer client commands](#developer-client-commands)
+- [Plugin system](#plugin-system)
+- [Plugin model metadata](#plugin-model-metadata)
 - [Sampling controls](#sampling-controls)
-- [Saving conversations](#saving-conversations)
 - [Collecting SFT and DPO data](#collecting-sft-and-dpo-data)
 - [Expected server API](#expected-server-api)
-- [Color output](#color-output)
 - [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
 - [License](#license)
 
 ---
 
-## Overview
+## Requirements
 
-ChatHaikuCLI lets you talk to a RootComputer model from your terminal.
+- Python 3.8 or newer
+- An internet connection for the public endpoint and update checks
+- A Rootcomputer-compatible server if using a local or custom endpoint
 
-The default endpoint is:
+The clients use only standard-library modules including:
 
-```text
-https://chathaiku.com/api/haiku.php
-```
+- `argparse`
+- `json`
+- `os`
+- `sys`
+- `time`
+- `threading`
+- `urllib`
+- `typing`
 
-That means a new user can usually run:
-
-```bash
-python chathaiku.py
-```
-
-and start chatting immediately, as long as the public endpoint is online.
-
-The developer version is intended for model testing, prompt evaluation, preference collection, and local/self-hosted endpoint development:
-
-```bash
-python chathaiku_dev.py
-```
+No package installation is required.
 
 ---
 
-## Repository files
+## Repository layout
 
-| File | Purpose |
-|---|---|
-| `chathaiku.py` | Public CLI client. Minimal, friendly interface for chatting with the default public Haiku endpoint or a custom endpoint. |
-| `chathaiku_dev.py` | Developer CLI client. Adds sampling controls, endpoint hot-swapping, health checks, retry/undo, latency stats, and JSONL feedback collection. |
+Recommended layout:
 
-> If your files downloaded as `chathaiku(1).py` and `chathaiku_dev(1).py`, rename them before publishing the repo:
->
-> ```bash
-> mv "chathaiku(1).py" chathaiku.py
-> mv "chathaiku_dev(1).py" chathaiku_dev.py
-> ```
+```text
+ChatHaikuCLI/
+├─ chathaiku.py
+├─ chathaiku_dev.py
+├─ README.md
+├─ assets/
+│  └─ banner.png
+└─ plugins/
+   ├─ autodpo.py
+   ├─ evaluator.py
+   └─ evaluator/
+      ├─ tests/
+      └─ results/
+```
 
-On Windows Command Prompt:
+Only the two client files are required for basic chat. The `plugins/` folder is only needed for developer plugins.
+
+If downloaded files have names like `chathaiku(1).py` or `chathaiku_dev(1).py`, rename them before publishing or running examples:
+
+```bash
+mv "chathaiku(1).py" chathaiku.py
+mv "chathaiku_dev(1).py" chathaiku_dev.py
+```
+
+Windows Command Prompt:
 
 ```bat
 rename chathaiku(1).py chathaiku.py
@@ -83,46 +108,22 @@ rename chathaiku_dev(1).py chathaiku_dev.py
 
 ---
 
-## Requirements
-
-ChatHaikuCLI is intentionally dependency-free.
-
-You need:
-
-- Python 3.8 or newer
-- An internet connection when using the public endpoint
-- A reachable RootComputer-compatible server when using a custom endpoint
-
-No `pip install` step is required.
-
-The clients use only Python standard-library modules:
-
-- `argparse`
-- `json`
-- `os`
-- `sys`
-- `time`
-- `urllib`
-- `typing`
-
----
-
 ## Quick start
 
-Clone the repo or download the two Python files, then run:
+Run the public client:
 
 ```bash
 python chathaiku.py
 ```
 
-You should see the ChatHaiku banner and a connection check. Once the client is ready, type a message:
+Send a message:
 
 ```text
 you: Hello, what can you do?
 haiku: ...
 ```
 
-Exit with:
+Exit:
 
 ```text
 /quit
@@ -132,84 +133,48 @@ or press `Ctrl-C`.
 
 ---
 
-## Installing Python
-
-If `python` is not recognized, install Python from the official Python website and make sure **Add Python to PATH** is enabled during installation.
-
-After installation, verify Python works:
-
-```bash
-python --version
-```
-
-On some systems, the command may be:
-
-```bash
-python3 --version
-```
-
-If your system uses `python3`, replace `python` with `python3` in all examples.
-
----
-
 ## Running the public client
 
-The public client is the normal user-facing CLI.
+The public client is the simple user-facing CLI.
 
 ```bash
 python chathaiku.py
 ```
 
-Run with a custom server or endpoint:
+Run with a custom endpoint:
 
 ```bash
 python chathaiku.py --server https://chathaiku.com/api/haiku.php
+python chathaiku.py --server http://localhost:8000
+python chathaiku.py --server http://localhost:8000/api/chat
 ```
 
-Disable terminal colors:
+Disable ANSI colors:
 
 ```bash
 python chathaiku.py --no-color
 ```
 
-You can also disable colors with the `NO_COLOR` environment variable:
+Disable update checks:
 
 ```bash
-NO_COLOR=1 python chathaiku.py
+python chathaiku.py --no-update-check
 ```
 
-Windows PowerShell:
+Use a custom update manifest:
 
-```powershell
-$env:NO_COLOR=1
-python chathaiku.py
+```bash
+python chathaiku.py --update-url https://example.com/chathaiku_cli_updates.json
 ```
-
-### Public client startup behavior
-
-When the public client starts, it:
-
-1. normalizes the configured server URL,
-2. prints the banner,
-3. checks whether the endpoint is reachable when a health route is available,
-4. starts an interactive chat loop.
-
-For public PHP proxy endpoints, there may be no health endpoint. In that case, the client treats the endpoint as configured and lets the first chat request report any real error.
 
 ---
 
 ## Running the developer client
 
-The developer client has advanced tools for testing and data collection.
+The developer client adds endpoint switching, sampling controls, plugins, health checks, retry/undo, latency reporting, and preference-data collection.
 
 ```bash
 python chathaiku_dev.py
-```
-
-Run against the public endpoint:
-
-```bash
-python chathaiku_dev.py --server https://chathaiku.com/api/haiku.php
 ```
 
 Run against a local server:
@@ -218,51 +183,86 @@ Run against a local server:
 python chathaiku_dev.py --server http://localhost:8000
 ```
 
-Run against a direct chat route:
+Run against a PHP router endpoint:
 
 ```bash
-python chathaiku_dev.py --server http://localhost:8000/api/chat
+python chathaiku_dev.py --server https://chathaiku.com/api/haiku.php
+python chathaiku_dev.py --server https://chathaiku.com/api/tanka.php
 ```
 
-Write collected preference data to custom files:
+Use custom output files for preference collection:
 
 ```bash
-python chathaiku_dev.py \
-  --dpo-out data/my_dpo_pairs.jsonl \
+python chathaiku_dev.py ^
+  --dpo-out data/my_dpo_pairs.jsonl ^
   --sft-positive-out data/my_sft_positive.jsonl
 ```
 
-Disable colors:
+Use a custom plugin folder:
 
 ```bash
-python chathaiku_dev.py --no-color
+python chathaiku_dev.py --plugins-dir plugins
+```
+
+Disable update checks:
+
+```bash
+python chathaiku_dev.py --no-update-check
 ```
 
 ---
 
-## Choosing a server or endpoint
+## Update checks
+
+Both clients include a notify-only update checker.
+
+Default manifest URL:
+
+```text
+https://rootcomputer.dev/software/chathaikucli/update/chathaiku_cli_updates.json
+```
+
+The update checker:
+
+1. checks in a quiet background loop,
+2. caches the result in memory,
+3. prints an update notice only at safe prompt boundaries,
+4. never rewrites or replaces files automatically.
+
+Manual check:
+
+```text
+/update
+```
+
+Startup/background flags:
+
+| Flag | Description |
+|---|---|
+| `--no-update-check` | Disable background update checks. |
+| `--update-url URL` | Use a custom update manifest URL. |
+| `--update-interval SECONDS` | Set background check interval. Default: `21600` seconds / 6 hours. |
+
+---
+
+## Endpoint formats
 
 Both clients accept `--server`.
 
-The value can be:
-
-1. a full public PHP proxy endpoint,
-2. a direct `/api/chat` endpoint,
-3. a base server URL,
-4. a pasted `/api/health` URL, or
-5. a relative `/api/...` path for the public ChatHaiku site.
+The value can be a public PHP router endpoint, a server base URL, a direct chat URL, a health URL, or a relative `/api/...` path.
 
 Examples:
 
 ```bash
 python chathaiku.py --server https://chathaiku.com/api/haiku.php
+python chathaiku.py --server https://chathaiku.com/api/tanka.php
 python chathaiku.py --server http://localhost:8000
 python chathaiku.py --server http://localhost:8000/api/chat
 python chathaiku.py --server http://localhost:8000/api/health
 python chathaiku.py --server /api/haiku.php
 ```
 
-If you provide a server without a URL scheme, the client adds one automatically:
+If no scheme is supplied, the client adds one:
 
 - local/private hosts use `http://`
 - public hosts use `https://`
@@ -279,128 +279,97 @@ is treated as:
 http://localhost:8000
 ```
 
----
-
-## Supported endpoint formats
-
-### Public PHP proxy endpoint
-
-```text
-https://chathaiku.com/api/haiku.php
-```
-
-Used directly as the chat URL.
-
-Health check:
-
-```text
-none
-```
-
-Public PHP proxy endpoints do not expose `/api/health`.
-
----
-
 ### Server base URL
+
+Input:
 
 ```text
 http://localhost:8000
 ```
 
-Resolved to:
+Resolved routes:
 
 ```text
-chat:   http://localhost:8000/api/chat
-health: http://localhost:8000/api/health
+display: http://localhost:8000
+chat:    http://localhost:8000/api/chat
+health:  http://localhost:8000/api/health
 ```
-
----
 
 ### Direct chat URL
 
+Input:
+
 ```text
 http://localhost:8000/api/chat
 ```
 
-Used directly as the chat URL.
-
-The health route is inferred as:
+Resolved routes:
 
 ```text
-http://localhost:8000/api/health
+display: http://localhost:8000
+chat:    http://localhost:8000/api/chat
+health:  http://localhost:8000/api/health
 ```
-
----
 
 ### Health URL
 
+Input:
+
 ```text
 http://localhost:8000/api/health
 ```
 
-Resolved back to the server base:
+Resolved routes:
 
 ```text
-http://localhost:8000
-```
-
-and chat requests are sent to:
-
-```text
-http://localhost:8000/api/chat
+display: http://localhost:8000
+chat:    http://localhost:8000/api/chat
+health:  http://localhost:8000/api/health
 ```
 
 ---
 
 ## Public client commands
 
-The public client supports a small command set:
-
 | Command | Description |
 |---|---|
-| `/clear` | Clear the current conversation history. |
+| `/clear` | Clear conversation history. |
 | `/save FILE` | Save the conversation transcript to a text file. |
+| `/update` | Check for CLI updates immediately. |
 | `/help` | Show command help. |
-| `/quit` | Exit the client. |
+| `/quit` | Exit. |
 | `/exit` | Exit alias. |
 | `/q` | Exit alias. |
 | `/bye` | Exit alias. |
-
-Example:
-
-```text
-you: /save conversation.txt
-```
 
 ---
 
 ## Developer client commands
 
-The developer client supports all common chat controls plus model-testing tools.
-
-### Conversation commands
+### Conversation
 
 | Command | Description |
 |---|---|
 | `/clear` | Reset conversation history. |
-| `/history` | Show the current conversation transcript. |
+| `/history` | Show the current transcript. |
 | `/save FILE` | Save the transcript to a file. |
 | `/retry` | Drop the last bot reply and re-ask the last user message. |
 | `/undo` | Drop the last exchange. |
 | `/help` | Show the full command list. |
-| `/quit` | Exit the client. |
+| `/quit` | Exit. |
 | `/exit` | Exit alias. |
 | `/q` | Exit alias. |
 
-### Server commands
+### Server and updates
 
 | Command | Description |
 |---|---|
-| `/endpoint URL` | Switch to a new endpoint without restarting the client. |
-| `/ping` | Check endpoint health or reachability. |
-| `/info` | Show the last known endpoint information. |
+| `/endpoint URL` | Switch endpoint/server without restarting. |
+| `/ping` | Check endpoint health/reachability and refresh cached model metadata. |
+| `/info` | Show last-known endpoint information. |
+| `/update` | Check for CLI updates immediately. |
 
-### Sampling commands
+### Sampling
 
 | Command | Description |
 |---|---|
@@ -410,9 +379,9 @@ The developer client supports all common chat controls plus model-testing tools.
 | `/max-new N` | Set maximum generated tokens per reply. |
 | `/rep-penalty F` | Set repetition penalty. |
 | `/no-repeat-ngram N` | Block repeated n-grams of size `N`. `0` disables this. |
-| `/params` | Show the current sampling parameters. |
+| `/params` | Show current sampling parameters. |
 
-### Feedback collection commands
+### Feedback collection
 
 | Command | Description |
 |---|---|
@@ -422,11 +391,80 @@ The developer client supports all common chat controls plus model-testing tools.
 | `/stats` | Show collected JSONL counts for this session and on disk. |
 | `/dpo-stats` | Alias for `/stats`. |
 
+### Plugins
+
+| Command | Description |
+|---|---|
+| `/plugin` | List loaded plugins. |
+| `/plugin reload` | Reload plugins from the plugin directory. |
+| `/plugin help <name>` | Show help for one plugin. |
+
+---
+
+## Plugin system
+
+Plugins are Python files in the configured plugin directory, usually:
+
+```text
+plugins/
+```
+
+Each plugin defines a subclass of the host `Plugin` class and registers one or more slash commands.
+
+Example layout:
+
+```text
+ChatHaikuCLI/
+├─ chathaiku_dev.py
+└─ plugins/
+   ├─ autodpo.py
+   └─ evaluator.py
+```
+
+Start the developer client and list plugins:
+
+```bash
+python chathaiku_dev.py
+```
+
+```text
+/plugin
+```
+
+Reload after adding or editing plugins:
+
+```text
+/plugin reload
+```
+
+---
+
+## Plugin model metadata
+
+`chathaiku_dev.py` caches health metadata in the shared runtime state after startup, `/ping`, and `/endpoint`.
+
+Plugins can read:
+
+```python
+ctx.health
+ctx.model_name
+```
+
+Plugins can refresh health metadata with:
+
+```python
+ctx.refresh_health()
+```
+
+This is used by bundled plugins so result files and generated DPO records include the active model name instead of `unknown` whenever `/api/health` reports a model.
+
+If the health request fails transiently, the developer client keeps the last known model name instead of wiping it.
+
 ---
 
 ## Sampling controls
 
-The public client sends a fixed sampling payload with each request:
+The public client sends a fixed sampling payload:
 
 ```json
 {
@@ -436,9 +474,9 @@ The public client sends a fixed sampling payload with each request:
 }
 ```
 
-The developer client sends configurable sampling values with each request.
+The developer client sends configurable sampling values.
 
-Current developer defaults are:
+Current developer defaults:
 
 ```json
 {
@@ -451,13 +489,13 @@ Current developer defaults are:
 }
 ```
 
-To inspect the current values during a developer session:
+Inspect current values:
 
 ```text
 /params
 ```
 
-To change values:
+Change values:
 
 ```text
 /temp 0.7
@@ -468,59 +506,20 @@ To change values:
 /no-repeat-ngram 4
 ```
 
-> Note: the developer script’s built-in `/help` text may mention older sampling defaults for temperature, top-p, and max tokens. The actual defaults are the values initialized in the `SamplingParams` class.
-
----
-
-## Saving conversations
-
-### Public client transcript format
-
-The public client saves transcripts like this:
-
-```text
-You: Hello.
-
-Haiku: Hello. How can I help?
-```
-
-Use:
-
-```text
-/save chat.txt
-```
-
-### Developer client transcript format
-
-The developer client saves numbered transcripts like this:
-
-```text
-[1] you: Hello.
-[2] haiku: Hello. How can I help?
-```
-
-Use:
-
-```text
-/save dev-chat.txt
-```
-
 ---
 
 ## Collecting SFT and DPO data
 
-The developer client can collect local JSONL data while you evaluate the model.
+The developer client can collect local JSONL preference data while you test the model.
 
-By default, it writes:
+Default output files:
 
 ```text
 data/dpo_pairs.jsonl
 data/sft_positive.jsonl
 ```
 
-The `data/` folder is created automatically when needed.
-
-### Positive SFT examples with `/good`
+### Positive SFT examples
 
 After a good model reply:
 
@@ -528,7 +527,7 @@ After a good model reply:
 /good
 ```
 
-The client appends one JSON object to `data/sft_positive.jsonl`:
+Example record:
 
 ```json
 {
@@ -536,20 +535,20 @@ The client appends one JSON object to `data/sft_positive.jsonl`:
   "chosen": "The model reply marked as good",
   "history": [],
   "server": "https://chathaiku.com/api/haiku.php",
-  "model": "Haiku public PHP proxy",
+  "model": "h2o8_preview_01",
   "ts": "2026-01-01T12:00:00"
 }
 ```
 
-### DPO pairs with `/bad`
+### DPO pairs
 
-After a bad model reply:
+After a bad reply:
 
 ```text
 /bad
 ```
 
-The client asks what the reply should have been. Enter the corrected reply, then finish with:
+The client asks for the preferred answer. End multi-line input with:
 
 ```text
 /end
@@ -561,7 +560,7 @@ Cancel with:
 /cancel
 ```
 
-The client appends one JSON object to `data/dpo_pairs.jsonl`:
+Example record:
 
 ```json
 {
@@ -571,49 +570,28 @@ The client appends one JSON object to `data/dpo_pairs.jsonl`:
   "history": [],
   "source": "bad",
   "server": "https://chathaiku.com/api/haiku.php",
-  "model": "Haiku public PHP proxy",
+  "model": "h2o8_preview_01",
   "ts": "2026-01-01T12:00:00"
 }
 ```
 
-### DPO pairs with `/rewrite`
+Use `/rewrite` when the model reply is acceptable but you want to provide a better preferred answer.
 
-Use `/rewrite` when the model answer is not necessarily bad, but you want to provide a better preferred answer.
-
-```text
-/rewrite
-```
-
-The saved JSONL object uses:
-
-```json
-"source": "rewrite"
-```
-
-### Checking collection stats
+Check counts:
 
 ```text
 /stats
 ```
 
-shows:
-
-- DPO pair file path
-- DPO records on disk
-- DPO records collected this session
-- SFT-positive file path
-- SFT-positive records on disk
-- SFT-positive records collected this session
-
 ---
 
 ## Expected server API
 
-ChatHaikuCLI expects a RootComputer-compatible HTTP API.
+ChatHaikuCLI expects a Rootcomputer-compatible HTTP API.
 
 ### Chat route
 
-The chat route accepts `POST` requests with JSON.
+A chat route accepts `POST` requests with JSON.
 
 For a server base URL, the route should be:
 
@@ -626,10 +604,7 @@ Example request:
 ```json
 {
   "history": [
-    {
-      "role": "user",
-      "content": "Hello"
-    }
+    {"role": "user", "content": "Hello"}
   ],
   "temperature": 0.85,
   "top_p": 0.92,
@@ -647,7 +622,7 @@ The developer client may also send:
 }
 ```
 
-The expected response is JSON with a string `reply` field:
+Expected response:
 
 ```json
 {
@@ -655,11 +630,9 @@ The expected response is JSON with a string `reply` field:
 }
 ```
 
-If the response contains an `error` field and no usable `reply`, the developer client reports it as a server error.
-
 ### Health route
 
-For self-hosted servers, the optional health route is:
+The optional health route is:
 
 ```text
 /api/health
@@ -669,42 +642,20 @@ Expected response:
 
 ```json
 {
-  "model": "Haiku",
-  "params": 217000000,
-  "device": "cuda"
+  "model": "h2o8_preview_01",
+  "params": 217515008,
+  "device": "cuda:1",
+  "status": "ok"
 }
 ```
 
-The clients can still use a direct PHP proxy or direct chat route without a health route.
-
----
-
-## Color output
-
-Both clients use ANSI colors by default.
-
-Disable colors with:
-
-```bash
-python chathaiku.py --no-color
-python chathaiku_dev.py --no-color
-```
-
-or with:
-
-```bash
-NO_COLOR=1 python chathaiku.py
-```
-
-On Windows, modern terminals such as Windows Terminal and recent PowerShell versions generally support ANSI colors. Older terminals may show raw escape codes. Use `--no-color` if that happens.
+The `model` field is used for saved preference examples and plugin result provenance.
 
 ---
 
 ## Troubleshooting
 
 ### `python` is not recognized
-
-Python is not installed or is not on PATH.
 
 Try:
 
@@ -718,9 +669,7 @@ If that works, run:
 python3 chathaiku.py
 ```
 
-Otherwise, reinstall Python and enable **Add Python to PATH**.
-
----
+Otherwise, reinstall Python and enable **Add Python to PATH** during installation.
 
 ### The client says the server is offline
 
@@ -728,11 +677,11 @@ Check that:
 
 - the endpoint is typed correctly,
 - your internet connection is working,
-- the public endpoint is currently online,
-- your local server is actually running if using `localhost`,
+- the public endpoint is online,
+- your local server is running,
 - the server exposes `/api/chat` if using a base URL.
 
-Try the developer client:
+Use the developer client for diagnosis:
 
 ```bash
 python chathaiku_dev.py --server YOUR_ENDPOINT
@@ -744,66 +693,64 @@ Then run:
 /ping
 ```
 
----
+### The model name is `unknown`
 
-### Public endpoint has no health route
-
-This is expected for PHP proxy endpoints such as:
+Run:
 
 ```text
-https://chathaiku.com/api/haiku.php
+/ping
 ```
 
-The client will say no health endpoint is exposed and will test the endpoint on the first chat request.
+Then check:
 
----
+```text
+/info
+```
+
+The endpoint must expose a compatible `/api/health` response with a non-empty `model` field. Plugins use cached `ctx.model_name`, so once the developer client sees a model name, AutoDPO and Evaluator can reuse it.
+
+### Update checks fail
+
+Manual check:
+
+```text
+/update
+```
+
+If it fails, check:
+
+- the manifest URL is reachable,
+- the manifest is valid JSON,
+- the manifest contains an app entry for `chathaiku` or `chathaiku_dev`,
+- the client has internet access.
+
+Disable update checks:
+
+```bash
+python chathaiku.py --no-update-check
+python chathaiku_dev.py --no-update-check
+```
 
 ### HTTP 412 from the public PHP endpoint
 
-Some shared-host or WAF setups can block Python-origin POST requests to a public PHP proxy. The clients include a backend fallback for this case. If both the public endpoint and fallback fail, the client prints the fallback error.
+Some WAF/shared-host setups can block Python-origin POST requests. The clients include a backend fallback for this case. If both the public endpoint and fallback fail, the client prints the fallback error.
 
----
+### JSON decode error
 
-### Server returns JSON decode error
+The endpoint returned non-JSON, usually because:
 
-The endpoint did not return valid JSON. Common causes:
-
-- the URL points to an HTML page instead of `/api/chat`,
+- the URL points to an HTML page,
 - the server crashed and returned an error page,
-- a proxy or firewall injected an HTML response,
-- the server route is not RootComputer-compatible.
+- a proxy injected HTML,
+- the endpoint is not Rootcomputer-compatible.
 
----
+### Empty reply
 
-### Server returned an empty reply
-
-The server responded, but the `reply` field was missing or empty.
-
-Check the server logs and confirm that the response format is:
+The server responded, but the `reply` field was missing or empty. Check server logs and confirm the response shape is:
 
 ```json
-{
-  "reply": "text here"
-}
+{"reply": "text here"}
 ```
-
----
-
-### Conversation history gets too long
-
-The public client sends the full in-memory conversation history.
-
-The developer client sends only the most recent 10 turns to match the public frontend behavior.
-
-Use:
-
-```text
-/clear
-```
-
-to reset the session.
-
----
 
 ### Colors look broken
 
@@ -811,28 +758,29 @@ Run with:
 
 ```bash
 python chathaiku.py --no-color
+python chathaiku_dev.py --no-color
 ```
 
-or:
+or set:
 
 ```bash
-python chathaiku_dev.py --no-color
+NO_COLOR=1
 ```
 
 ---
 
 ## Security notes
 
-ChatHaikuCLI sends your conversation text to the configured server endpoint.
+ChatHaikuCLI sends conversation text to the configured endpoint.
 
-When using the public endpoint, do not send secrets, passwords, private keys, or sensitive personal data. When using a self-hosted endpoint, review your own server logging and retention behavior.
+Do not send secrets, passwords, API keys, private keys, or sensitive personal data unless you control the endpoint and understand its logging behavior.
 
-The developer client writes feedback data locally to JSONL files. Review those files before sharing them or using them for model training.
+The developer client writes local feedback JSONL files. Review those files before publishing, sharing, or training on them.
+
+Update checks are notify-only. The clients do not automatically download, replace, or execute updated code.
 
 ---
 
 ## License
 
-```text
 MIT License
-```
