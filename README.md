@@ -80,14 +80,8 @@ ChatHaikuCLI/
 ├─ chathaiku.py
 ├─ chathaiku_dev.py
 ├─ README.md
-├─ assets/
-│  └─ banner.png
-└─ plugins/
-   ├─ autodpo.py
-   ├─ evaluator.py
-   └─ evaluator/
-      ├─ tests/
-      └─ results/
+├─ plugins/
+
 ```
 
 Only the two client files are required for basic chat. The `plugins/` folder is only needed for developer plugins.
