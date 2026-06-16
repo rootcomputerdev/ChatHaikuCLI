@@ -22,6 +22,7 @@ import sys
 import json
 import time
 import argparse
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -39,7 +40,7 @@ BANNER = r"""
 ██║      ██╔══██║ ██╔══██║    ██║   ██╔══██║ ██╔══██║   ██║    ██╔═██╗  ██║  ██║
 ╚██████╗ ██║  ██║ ██║  ██║    ██║   ██║  ██║ ██║  ██║ ██████╗  ██║  ██╗ ╚██████╔╝
  ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝    ╚═╝   ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═════╝  ╚═╝  ╚═╝  ╚═════╝ 
-                                                               d e v ( v 1 . 1 )
+                                                               d e v ( v 1 . 2 )
 """
 
 class Color:
@@ -91,6 +92,9 @@ def print_banner(server_url: str, health: Optional[dict]):
 # ──────────────────────────────────────────────────────────
 
 DEFAULT_ENDPOINT = "https://chathaiku.com/api/haiku.php"
+APP_NAME = "chathaiku_dev"
+APP_VERSION = "1.2.0"
+UPDATE_MANIFEST_URL = "https://rootcomputer.dev/software/chathaikucli/update/chathaiku_cli_updates.json"
 
 
 def make_request_headers(url: str, *, has_json_body: bool = False) -> dict:
@@ -147,7 +151,8 @@ def normalize_server_url(raw_url: str) -> str:
     raw_url = (raw_url or "").strip().rstrip("/")
     if not raw_url:
         raise ValueError("empty endpoint")
-      
+
+    # Allow CLI users to type the same relative endpoint shown in main_chat.js.
     if raw_url.startswith("/api/"):
         raw_url = "https://chathaiku.com" + raw_url
 
@@ -184,6 +189,8 @@ def resolve_endpoint(server_url: str) -> dict:
     def with_path(new_path: str) -> str:
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, new_path.rstrip("/"), "", ""))
 
+    # Direct chat route, including PHP-router chat routes like:
+    # /api/haiku.php/api/chat or /api/tanka.php/api/chat
     if path.endswith("/api/chat"):
         base_path = path[:-len("/api/chat")].rstrip("/")
         base_url = with_path(base_path).rstrip("/")
@@ -194,6 +201,8 @@ def resolve_endpoint(server_url: str) -> dict:
             "kind": "direct-chat",
         }
 
+    # Health route pasted directly. Convert it back to its dynamic base.
+    # For example, /api/tanka.php/api/health -> /api/tanka.php.
     if path.endswith("/api/health"):
         base_path = path[:-len("/api/health")].rstrip("/")
         base_url = with_path(base_path).rstrip("/")
@@ -204,6 +213,9 @@ def resolve_endpoint(server_url: str) -> dict:
             "kind": "server-base",
         }
 
+    # PHP router/proxy base used by the public website:
+    # /api/haiku.php, /api/tanka.php, etc.
+    # Do not hardcode the model name; derive health/chat from the chosen PHP file.
     if path.endswith(".php"):
         base_url = display_url.rstrip("/")
         return {
@@ -240,6 +252,204 @@ def ping_server(server_url: str, timeout: float = 5.0) -> Optional[dict]:
     except (ValueError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
             json.JSONDecodeError, ConnectionRefusedError, OSError):
         return None
+
+
+
+def extract_model_name(health: Optional[dict]) -> str:
+    if isinstance(health, dict):
+        model = health.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return "unknown"
+
+
+def sync_health_state(state: dict, health: Optional[dict]) -> None:
+    """Keep cached health/model/server metadata consistent for plugins and collectors."""
+    state["health"] = health
+    state["model_name"] = extract_model_name(health)
+
+    pc = state.get("preferences")
+    if pc is not None:
+        pc.server_url = state.get("server_url", getattr(pc, "server_url", ""))
+        pc.model_name = state["model_name"]
+
+
+def _version_key(value: str) -> tuple:
+    """Convert loose semver-ish strings into comparable tuples."""
+    text = str(value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    text = text.replace("-", ".").replace("_", ".")
+    parts = []
+    for chunk in text.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            parts.append(int(digits))
+        elif chunk:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+def _select_update_record(manifest: dict, app_name: str) -> Optional[dict]:
+    """Support both {apps:{name:{...}}} and flat manifest shapes."""
+    if not isinstance(manifest, dict):
+        return None
+
+    record = None
+    apps = manifest.get("apps")
+    if isinstance(apps, dict):
+        record = apps.get(app_name)
+        if record is None and app_name == "chathaiku_dev":
+            record = apps.get("chathaiku-dev")
+        if record is None and app_name == "chathaiku":
+            record = apps.get("chathaiku_cli")
+
+    if record is None:
+        record = manifest.get(app_name)
+
+    if record is None and any(k in manifest for k in ("latest", "version", "latest_version")):
+        record = manifest
+
+    if isinstance(record, str):
+        record = {"latest": record}
+    return record if isinstance(record, dict) else None
+
+
+def check_for_update(app_name: str, current_version: str, manifest_url: str,
+                     timeout: float = 4.0) -> Optional[dict]:
+    """Fetch the update manifest and return a normalized status dictionary."""
+    if not manifest_url:
+        return None
+
+    req = urllib.request.Request(
+        manifest_url,
+        headers=make_request_headers(manifest_url),
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        manifest = json.loads(resp.read().decode("utf-8"))
+
+    record = _select_update_record(manifest, app_name)
+    if not record:
+        return None
+
+    latest = (
+        record.get("latest")
+        or record.get("version")
+        or record.get("latest_version")
+    )
+    if latest is None:
+        return None
+    latest = str(latest).strip()
+
+    return {
+        "app": app_name,
+        "current": current_version,
+        "latest": latest,
+        "up_to_date": _version_key(latest) <= _version_key(current_version),
+        "download_url": record.get("download_url") or record.get("url"),
+        "notes_url": record.get("notes_url") or record.get("changelog_url"),
+        "message": record.get("message") or record.get("notes"),
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def start_update_check_loop(state: dict, app_name: str, current_version: str,
+                            manifest_url: str, interval: float) -> None:
+    """Start a quiet background update loop.
+
+    The worker never prints while input() is active. It only caches status;
+    the main loop prints notices at safe prompt boundaries.
+    """
+    if not manifest_url or interval <= 0:
+        return
+
+    lock = state.setdefault("update_lock", threading.Lock())
+    stop_event = threading.Event()
+    state["update_stop_event"] = stop_event
+    state["update_url"] = manifest_url
+    state["update_interval"] = interval
+
+    def worker():
+        while not stop_event.is_set():
+            try:
+                result = check_for_update(app_name, current_version, manifest_url)
+                with lock:
+                    state["update_last_result"] = result
+                    state["update_last_error"] = None
+                    if result and not result.get("up_to_date"):
+                        state["update_notice"] = result
+            except Exception as e:
+                with lock:
+                    state["update_last_error"] = str(e)
+            stop_event.wait(max(1.0, float(interval)))
+
+    thread = threading.Thread(target=worker, name="chathaiku-update-check", daemon=True)
+    state["update_thread"] = thread
+    thread.start()
+
+
+def print_update_notice_if_needed(state: dict, force: bool = False) -> None:
+    lock = state.get("update_lock")
+    if lock is None:
+        return
+
+    with lock:
+        notice = state.get("update_notice")
+        if not notice:
+            return
+        notice_key = f"{notice.get('app')}:{notice.get('latest')}"
+        if not force and state.get("update_notice_shown") == notice_key:
+            return
+        state["update_notice_shown"] = notice_key
+
+    print(Color.YELLOW +
+          f"  Update available: {notice.get('app')} "
+          f"{notice.get('current')} → {notice.get('latest')}" + Color.RESET)
+    if notice.get("message"):
+        print(Color.DIM + f"  {notice['message']}" + Color.RESET)
+    if notice.get("download_url"):
+        print(Color.DIM + f"  Download: {notice['download_url']}" + Color.RESET)
+    if notice.get("notes_url"):
+        print(Color.DIM + f"  Notes:    {notice['notes_url']}" + Color.RESET)
+    print(Color.DIM + "  Run /update to check again." + Color.RESET)
+    print()
+
+
+def run_manual_update_check(state: dict, app_name: str, current_version: str) -> None:
+    manifest_url = state.get("update_url") or UPDATE_MANIFEST_URL
+    print(Color.DIM + f"  Checking for updates at {manifest_url}..." + Color.RESET, end="", flush=True)
+    try:
+        result = check_for_update(app_name, current_version, manifest_url)
+    except Exception as e:
+        print(Color.RED + " failed" + Color.RESET)
+        print(Color.YELLOW + f"  Update check error: {e}" + Color.RESET)
+        return
+
+    lock = state.setdefault("update_lock", threading.Lock())
+    with lock:
+        state["update_last_result"] = result
+        state["update_last_error"] = None
+        if result and not result.get("up_to_date"):
+            state["update_notice"] = result
+            state["update_notice_shown"] = None
+
+    if result and not result.get("up_to_date"):
+        print(Color.YELLOW + " update available" + Color.RESET)
+        print_update_notice_if_needed(state, force=True)
+    elif result:
+        print(Color.GREEN + " up to date" + Color.RESET)
+        print(Color.DIM + f"  Current: {current_version}  Latest: {result.get('latest')}" + Color.RESET)
+    else:
+        print(Color.YELLOW + " no app entry found" + Color.RESET)
+        print(Color.DIM + "  Manifest loaded, but no matching version entry was found." + Color.RESET)
 
 
 def post_chat(server_url: str, history: List[dict], params: dict,
@@ -445,6 +655,10 @@ def read_multiline_input(label: str) -> Optional[str]:
 #
 # Plugin code receives a `PluginContext` object exposing:
 #   ctx.server_url     -- current chat endpoint
+#   ctx.health         -- last cached /api/health dictionary, if available
+#   ctx.model_name     -- last cached model name from /api/health
+#   ctx.refresh_health() -> dict|None
+#                      -- refreshes cached health/model metadata
 #   ctx.sampling       -- current SamplingParams (read or modify)
 #   ctx.conversation   -- the Conversation (read or clear)
 #   ctx.preferences    -- the PreferenceCollector (record_good / record_preference)
@@ -478,6 +692,21 @@ class PluginContext:
     @property
     def preferences(self) -> "PreferenceCollector":
         return self._state["preferences"]
+
+    @property
+    def health(self) -> Optional[dict]:
+        return self._state.get("health")
+
+    @property
+    def model_name(self) -> str:
+        return self._state.get("model_name", "unknown")
+
+    def refresh_health(self) -> Optional[dict]:
+        health = ping_server(self.server_url)
+        # Do not erase a known model name on a transient health failure.
+        if health is not None:
+            sync_health_state(self._state, health)
+        return health
 
     def chat(self, prompt: str, history: Optional[List[dict]] = None,
              sampling_override: Optional[dict] = None) -> Optional[str]:
@@ -648,6 +877,7 @@ Server:
   /endpoint URL       Switch endpoint/server. Accepts /api/haiku.php, full PHP URLs, or server bases
   /ping               Check endpoint health/reachability
   /info               Show last-known endpoint info
+  /update             Check for CLI updates now
 
 Feedback collection (writes JSONL files for offline DPO):
   /good               Save last reply as positive SFT example
@@ -772,9 +1002,7 @@ def handle_slash(cmd: str, args: List[str], state: dict) -> bool:
                 else:
                     print(Color.GREEN + " ok" + Color.RESET)
                 state["server_url"] = new_url
-                state["health"] = health
-                pc.server_url = new_url
-                pc.model_name = health.get("model", "unknown")
+                sync_health_state(state, health)
             else:
                 print(Color.RED + " offline" + Color.RESET)
                 print(Color.YELLOW + "  Keeping current endpoint." + Color.RESET)
@@ -788,7 +1016,7 @@ def handle_slash(cmd: str, args: List[str], state: dict) -> bool:
             else:
                 print(Color.GREEN + " ok" + Color.RESET)
             print(Color.DIM + f"  {json.dumps(health, indent=2)}" + Color.RESET)
-            state["health"] = health
+            sync_health_state(state, health)
         else:
             print(Color.RED + " offline" + Color.RESET)
 
@@ -796,8 +1024,12 @@ def handle_slash(cmd: str, args: List[str], state: dict) -> bool:
         h = state.get("health")
         if h:
             print(Color.DIM + json.dumps(h, indent=2) + Color.RESET)
+            print(Color.DIM + f"  Cached model: {state.get('model_name', 'unknown')}" + Color.RESET)
         else:
             print(Color.YELLOW + "  No server info cached. Try /ping." + Color.RESET)
+
+    elif cmd == "/update":
+        run_manual_update_check(state, APP_NAME, APP_VERSION)
 
     # ── DPO / SFT collection ──
     elif cmd == "/good":
@@ -933,6 +1165,12 @@ def main():
                    help="JSONL file for /good positive examples")
     p.add_argument("--plugins-dir", type=str, default="plugins",
                    help="Directory to load plugins from (default: plugins)")
+    p.add_argument("--no-update-check", action="store_true",
+                   help="Disable background CLI update checks")
+    p.add_argument("--update-url", type=str, default=UPDATE_MANIFEST_URL,
+                   help=f"Update manifest URL (default: {UPDATE_MANIFEST_URL})")
+    p.add_argument("--update-interval", type=float, default=21600.0,
+                   help="Seconds between background update checks (default: 21600 / 6 hours)")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI colors")
     args = p.parse_args()
@@ -961,17 +1199,22 @@ def main():
         dpo_path=args.dpo_out,
         sft_positive_path=args.sft_positive_out,
         server_url=server_url,
-        model_name=(health or {}).get("model", "unknown"),
+        model_name=extract_model_name(health),
     )
 
     state = {
         "server_url": server_url,
         "health": health,
+        "model_name": extract_model_name(health),
         "conversation": conv,
         "sampling": sampling,
         "preferences": preferences,
         "pending_retry": None,
+        "update_url": args.update_url,
     }
+    sync_health_state(state, health)
+    if not args.no_update_check:
+        start_update_check_loop(state, APP_NAME, APP_VERSION, args.update_url, args.update_interval)
 
     # Load plugins from ./plugins/ (or wherever --plugins-dir points)
     plugin_manager = PluginManager(plugins_dir=args.plugins_dir, state=state)
@@ -990,6 +1233,7 @@ def main():
         print()
 
     while True:
+        print_update_notice_if_needed(state)
         # Get input
         if state.get("pending_retry") is not None:
             user_input = state.pop("pending_retry")
