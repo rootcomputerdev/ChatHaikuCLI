@@ -9,7 +9,7 @@ ChatHaikuCLI ships with two Python clients:
 | File | Purpose |
 |---|---|
 | `chathaiku.py` | Public CLI client for everyday terminal chat. |
-| `chathaiku_dev.py` | Developer CLI client with endpoint switching, sampling controls, health checks, plugin support, evaluator tooling, AutoDPO support, latency output, and local preference-data collection. |
+| `chathaiku_dev.py` | Developer CLI client with endpoint switching, public model selection, sampling controls and presets, health checks, plugin support, evaluator tooling, AutoDPO support, latency output, and local preference-data collection. |
 
 Both clients use only the Python standard library. No `pip install` step is required.
 
@@ -19,6 +19,8 @@ Both clients use only the Python standard library. No `pip install` step is requ
 
 - Works with Rootcomputer-compatible `/api/chat` endpoints.
 - Supports public PHP router endpoints such as `https://chathaiku.com/api/haiku.php`.
+- Includes a developer `/models` board for public Rootcomputer endpoints: Haiku H2 and Tanka 3.5.
+- Includes developer sampling presets through `/preset` and `/presets`.
 - Infers `/api/chat` and `/api/health` routes from base URLs, direct chat URLs, health URLs, and PHP router URLs.
 - Includes notify-only update checks using the Rootcomputer update manifest.
 - Includes a developer plugin system for tools like `/autodpo` and `/evaluator`.
@@ -37,11 +39,13 @@ Both clients use only the Python standard library. No `pip install` step is requ
 - [Running the developer client](#running-the-developer-client)
 - [Update checks](#update-checks)
 - [Endpoint formats](#endpoint-formats)
+- [Public model registry](#public-model-registry)
 - [Public client commands](#public-client-commands)
 - [Developer client commands](#developer-client-commands)
 - [Plugin system](#plugin-system)
 - [Plugin model metadata](#plugin-model-metadata)
 - [Sampling controls](#sampling-controls)
+- [Sampling presets](#sampling-presets)
 - [Collecting SFT and DPO data](#collecting-sft-and-dpo-data)
 - [Expected server API](#expected-server-api)
 - [Troubleshooting](#troubleshooting)
@@ -323,6 +327,37 @@ health:  http://localhost:8000/api/health
 
 ---
 
+## Public model registry
+
+`chathaiku_dev.py` includes a public Rootcomputer model registry for quick endpoint selection.
+
+| Key | Model | Endpoint |
+|---|---|---|
+| `haiku` | Haiku H2 | `https://chathaiku.com/api/haiku.php` |
+| `tanka` | Tanka 3.5 | `https://chathaiku.com/api/tanka.php` |
+
+List public models and probe their current status:
+
+```text
+/models
+```
+
+Switch models:
+
+```text
+/models use haiku
+/models use tanka
+```
+
+The same keys can be passed to `/endpoint`:
+
+```text
+/endpoint haiku
+/endpoint tanka
+```
+
+When a model is selected, the developer client probes the endpoint first. If the endpoint is offline, the current endpoint is kept.
+
 ## Public client commands
 
 | Command | Description |
@@ -358,7 +393,9 @@ health:  http://localhost:8000/api/health
 
 | Command | Description |
 |---|---|
-| `/endpoint URL` | Switch endpoint/server without restarting. |
+| `/models` | Show public Rootcomputer model endpoints and live status. |
+| `/models use KEY` | Switch to a public model key: `haiku` or `tanka`. |
+| `/endpoint URL` | Switch endpoint/server without restarting. Accepts normal endpoints and public model keys. |
 | `/ping` | Check endpoint health/reachability and refresh cached model metadata. |
 | `/info` | Show last-known endpoint information. |
 | `/update` | Check for CLI updates immediately. |
@@ -367,6 +404,9 @@ health:  http://localhost:8000/api/health
 
 | Command | Description |
 |---|---|
+| `/preset` | List available sampling presets. |
+| `/presets` | Alias for `/preset`. |
+| `/preset NAME` | Apply a sampling preset: `balanced`, `precise`, `creative`, `long`, or `eval`. |
 | `/temp F` | Set temperature. |
 | `/top-p F` | Set nucleus sampling value. |
 | `/top-k N` | Set top-k sampling value. `0` disables top-k. |
@@ -470,7 +510,7 @@ The public client sends a fixed sampling payload:
 
 The developer client sends configurable sampling values.
 
-Current developer defaults:
+Current developer defaults match the `balanced` preset:
 
 ```json
 {
@@ -483,7 +523,7 @@ Current developer defaults:
 }
 ```
 
-Inspect current values:
+Inspect current values and active preset:
 
 ```text
 /params
@@ -501,6 +541,42 @@ Change values:
 ```
 
 ---
+
+## Sampling presets
+
+The developer client includes built-in sampling presets for common workflows.
+
+List presets:
+
+```text
+/preset
+```
+
+or:
+
+```text
+/presets
+```
+
+Apply a preset:
+
+```text
+/preset balanced
+/preset precise
+/preset creative
+/preset long
+/preset eval
+```
+
+| Preset | Use case | Temperature | Top-p | Top-k | Max new tokens | Repetition penalty | No-repeat ngram |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `balanced` | Default chat behavior | `0.35` | `0.37` | `0` | `80` | `1.15` | `4` |
+| `precise` | Lower-variance answers | `0.15` | `0.50` | `0` | `100` | `1.12` | `4` |
+| `creative` | Higher-diversity replies | `0.75` | `0.90` | `0` | `180` | `1.10` | `3` |
+| `long` | Longer helpful responses | `0.45` | `0.75` | `0` | `240` | `1.12` | `4` |
+| `eval` | Deterministic scoring | `0.0` | `1.0` | `1` | `32` | `1.0` | `0` |
+
+Manual sampling changes still work after applying a preset. If the active values no longer match a preset, `/params` reports the preset as `custom`.
 
 ## Collecting SFT and DPO data
 
