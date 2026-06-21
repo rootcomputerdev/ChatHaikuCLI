@@ -7,6 +7,7 @@ Like chathaiku.py but with the controls you'd want as a developer:
   - Hot-swap server endpoints with /endpoint
   - Latency and token-count display per request
   - Health check command
+  - Public model listing and sampling presets
 
 Usage:
   python chathaiku_dev.py
@@ -40,7 +41,7 @@ BANNER = r"""
 ██║      ██╔══██║ ██╔══██║    ██║   ██╔══██║ ██╔══██║   ██║    ██╔═██╗  ██║  ██║
 ╚██████╗ ██║  ██║ ██║  ██║    ██║   ██║  ██║ ██║  ██║ ██████╗  ██║  ██╗ ╚██████╔╝
  ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝    ╚═╝   ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═════╝  ╚═╝  ╚═╝  ╚═════╝ 
-                                                               d e v ( v 1 . 2 )
+                                                               d e v ( v 1 . 3 )
 """
 
 class Color:
@@ -93,8 +94,22 @@ def print_banner(server_url: str, health: Optional[dict]):
 
 DEFAULT_ENDPOINT = "https://chathaiku.com/api/haiku.php"
 APP_NAME = "chathaiku_dev"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 UPDATE_MANIFEST_URL = "https://rootcomputer.dev/software/chathaikucli/update/chathaiku_cli_updates.json"
+
+PUBLIC_MODELS = [
+    {
+        "key": "haiku",
+        "name": "Haiku H2",
+        "endpoint": "https://chathaiku.com/api/haiku.php",
+    },
+    {
+        "key": "tanka",
+        "name": "Tanka 3.5",
+        "endpoint": "https://chathaiku.com/api/tanka.php",
+    },
+]
+PUBLIC_MODEL_MAP = {m["key"]: m for m in PUBLIC_MODELS}
 
 
 def make_request_headers(url: str, *, has_json_body: bool = False) -> dict:
@@ -502,6 +517,65 @@ def post_chat(server_url: str, history: List[dict], params: dict,
 #  Sampling parameters (client-side state, sent with each request)
 # ──────────────────────────────────────────────────────────
 
+SAMPLING_PRESETS = {
+    "balanced": {
+        "label": "Balanced chat",
+        "values": {
+            "temperature": 0.35,
+            "top_p": 0.37,
+            "top_k": 0,
+            "max_new_tokens": 80,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram": 4,
+        },
+    },
+    "precise": {
+        "label": "Low-variance answers",
+        "values": {
+            "temperature": 0.15,
+            "top_p": 0.50,
+            "top_k": 0,
+            "max_new_tokens": 100,
+            "repetition_penalty": 1.12,
+            "no_repeat_ngram": 4,
+        },
+    },
+    "creative": {
+        "label": "Higher-diversity replies",
+        "values": {
+            "temperature": 0.75,
+            "top_p": 0.90,
+            "top_k": 0,
+            "max_new_tokens": 180,
+            "repetition_penalty": 1.10,
+            "no_repeat_ngram": 3,
+        },
+    },
+    "long": {
+        "label": "Longer helpful responses",
+        "values": {
+            "temperature": 0.45,
+            "top_p": 0.75,
+            "top_k": 0,
+            "max_new_tokens": 240,
+            "repetition_penalty": 1.12,
+            "no_repeat_ngram": 4,
+        },
+    },
+    "eval": {
+        "label": "Deterministic scoring",
+        "values": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 1,
+            "max_new_tokens": 32,
+            "repetition_penalty": 1.0,
+            "no_repeat_ngram": 0,
+        },
+    },
+}
+
+
 class SamplingParams:
     def __init__(self):
         # Defaults match the public Haiku Mini website's casual profile.
@@ -521,6 +595,11 @@ class SamplingParams:
             "repetition_penalty": self.repetition_penalty,
             "no_repeat_ngram": self.no_repeat_ngram,
         }
+
+    def apply(self, values: dict):
+        for key in self.to_payload():
+            if key in values:
+                setattr(self, key, values[key])
 
     def show(self) -> str:
         return (
@@ -856,6 +935,88 @@ class PluginManager:
         return True
 
 
+def _fmt_params(value) -> str:
+    if isinstance(value, int):
+        return f"{value:,}"
+    if value is None:
+        return "?"
+    return str(value)
+
+
+def _public_model_for_key(key: str) -> Optional[dict]:
+    return PUBLIC_MODEL_MAP.get((key or "").strip().lower())
+
+
+def print_public_models(state: dict) -> None:
+    current = ""
+    try:
+        current = resolve_endpoint(state.get("server_url", ""))["display_url"]
+    except ValueError:
+        pass
+
+    print(Color.DIM + "  Public Rootcomputer models:" + Color.RESET)
+    for item in PUBLIC_MODELS:
+        endpoint = resolve_endpoint(item["endpoint"])["display_url"]
+        active = "*" if endpoint == current else " "
+        health = ping_server(endpoint, timeout=3.0)
+        if health:
+            status = "ok" if health.get("health") != "not_available" else "no-health"
+            model = health.get("model", "?")
+            device = health.get("device", "?")
+            params = _fmt_params(health.get("params"))
+            print(Color.DIM +
+                  f"  {active} {item['key']:<6} {item['name']:<10} {status:<9} "
+                  f"model={model} device={device} params={params}" + Color.RESET)
+        else:
+            print(Color.YELLOW +
+                  f"  {active} {item['key']:<6} {item['name']:<10} offline   "
+                  f"endpoint={endpoint}" + Color.RESET)
+    print(Color.DIM + "  Use /models use haiku or /models use tanka to switch." + Color.RESET)
+
+
+def use_public_model(key: str, state: dict) -> None:
+    item = _public_model_for_key(key)
+    if item is None:
+        names = ", ".join(m["key"] for m in PUBLIC_MODELS)
+        print(Color.YELLOW + f"  Unknown model key: {key}. Available: {names}" + Color.RESET)
+        return
+
+    new_url = resolve_endpoint(item["endpoint"])["display_url"]
+    print(Color.DIM + f"  Probing {item['name']} at {new_url}..." + Color.RESET, end="", flush=True)
+    health = ping_server(new_url)
+    if health:
+        state["server_url"] = new_url
+        sync_health_state(state, health)
+        status = "configured" if health.get("health") == "not_available" else "ok"
+        print(Color.GREEN + f" {status}" + Color.RESET)
+        print(Color.DIM + f"  Endpoint → {new_url}" + Color.RESET)
+        print(Color.DIM + f"  Model: {state.get('model_name', 'unknown')}" + Color.RESET)
+    else:
+        print(Color.RED + " offline" + Color.RESET)
+        print(Color.YELLOW + "  Keeping current endpoint." + Color.RESET)
+
+
+def current_sampling_preset(sp: SamplingParams) -> str:
+    payload = sp.to_payload()
+    for name, preset in SAMPLING_PRESETS.items():
+        if payload == preset["values"]:
+            return name
+    return "custom"
+
+
+def print_sampling_presets(sp: SamplingParams) -> None:
+    current = current_sampling_preset(sp)
+    print(Color.DIM + "  Sampling presets:" + Color.RESET)
+    for name, preset in SAMPLING_PRESETS.items():
+        mark = "*" if name == current else " "
+        v = preset["values"]
+        print(Color.DIM +
+              f"  {mark} {name:<8} {preset['label']:<24} "
+              f"temp={v['temperature']} top_p={v['top_p']} top_k={v['top_k']} "
+              f"max_new={v['max_new_tokens']}" + Color.RESET)
+    print(Color.DIM + "  Use /preset <name> to apply one." + Color.RESET)
+
+
 HELP_TEXT = """
 Chat commands:
   /clear              Reset conversation history
@@ -865,15 +1026,19 @@ Chat commands:
   /undo               Drop the last exchange
 
 Sampling (sent with next request):
-  /temp F             Temperature (default 0.85)
-  /top-p F            Nucleus sampling (default 0.92)
+  /preset             List sampling presets
+  /preset NAME        Apply a preset: balanced, precise, creative, long, eval
+  /temp F             Temperature (default 0.35)
+  /top-p F            Nucleus sampling (default 0.37)
   /top-k N            Top-k (0 = off, default 0)
-  /max-new N          Max tokens per reply (default 200)
+  /max-new N          Max tokens per reply (default 80)
   /rep-penalty F      Repetition penalty (default 1.15)
   /no-repeat-ngram N  Block repeated n-grams (default 4, 0 = off)
   /params             Show current sampling params
 
 Server:
+  /models             Show public Rootcomputer model endpoints
+  /models use KEY     Switch to haiku or tanka
   /endpoint URL       Switch endpoint/server. Accepts /api/haiku.php, full PHP URLs, or server bases
   /ping               Check endpoint health/reachability
   /info               Show last-known endpoint info
@@ -980,16 +1145,43 @@ def handle_slash(cmd: str, args: List[str], state: dict) -> bool:
             try: sp.no_repeat_ngram = int(args[0]); print(Color.DIM + f"  no_repeat_ngram → {sp.no_repeat_ngram}" + Color.RESET)
             except ValueError: print(Color.RED + f"  Invalid: {args[0]}" + Color.RESET)
 
+    elif cmd in ("/preset", "/presets"):
+        if not args or args[0] == "list":
+            print_sampling_presets(sp)
+        else:
+            name = args[0].strip().lower()
+            preset = SAMPLING_PRESETS.get(name)
+            if not preset:
+                names = ", ".join(SAMPLING_PRESETS)
+                print(Color.YELLOW + f"  Unknown preset: {args[0]}. Available: {names}" + Color.RESET)
+            else:
+                sp.apply(preset["values"])
+                print(Color.GREEN + f"  Applied preset: {name}" + Color.RESET)
+                print(Color.DIM + sp.show() + Color.RESET)
+
     elif cmd == "/params":
-        print(Color.DIM + sp.show() + Color.RESET)
+        print(Color.DIM + f"  preset:             {current_sampling_preset(sp)}\n" + sp.show() + Color.RESET)
 
     # ── Server ──
+    elif cmd == "/models":
+        if not args:
+            print_public_models(state)
+        elif args[0] in ("use", "switch"):
+            if len(args) < 2:
+                print(Color.YELLOW + "  Usage: /models use <haiku|tanka>" + Color.RESET)
+            else:
+                use_public_model(args[1], state)
+        else:
+            use_public_model(args[0], state)
+
     elif cmd == "/endpoint":
         if not args:
             print(Color.DIM + f"  Current endpoint: {state['server_url']}" + Color.RESET)
         else:
+            target = _public_model_for_key(args[0])
+            raw_url = target["endpoint"] if target else args[0]
             try:
-                new_url = resolve_endpoint(args[0])["display_url"]
+                new_url = resolve_endpoint(raw_url)["display_url"]
             except ValueError as e:
                 print(Color.RED + f"  Invalid endpoint: {e}" + Color.RESET)
                 return True
